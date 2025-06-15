@@ -5,7 +5,6 @@ import ast
 import json
 from datetime import date,datetime, timedelta
 from utils.io import load_csv, save_csv
-import ast
 import altair as alt
 
 # Fichiers CSV utilisés
