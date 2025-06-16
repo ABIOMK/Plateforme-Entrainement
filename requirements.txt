@@ -1,4 +1,7 @@
 streamlit
 pandas
-plotly
+plotly==5.15.0
 altair
+oauth2client
+gspread
+google-auth
