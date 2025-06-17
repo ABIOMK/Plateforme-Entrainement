@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from datetime import date,datetime, timedelta
 import datetime as dt
 import json
 import calendar
@@ -7,6 +8,7 @@ import os
 from utils.io import load_csv, save_csv
 import plotly.express as px
 import plotly.graph_objects as go
+import streamlit.components.v1 as components
 
 ASSIGN_FILE = "data/assignments.csv"
 #SEANCES_FILE = "data/seances.csv"
@@ -184,47 +186,60 @@ def afficher_blocs(blocs):
         for b in blocs
     ])
 
+def extraire_date_lundi(chaine_semaine):
+    try:
+        jour_mois = chaine_semaine.split(" - ")[1]
+        annee = datetime.today().year
+        return datetime.strptime(f"{jour_mois}/{annee}", "%d/%m/%Y")
+    except Exception:
+        return None
+
 def page_athlete(nom_athlete):
     st.header("🏃 Espace Athlètes")
-
     st.write(f"Bonjour {nom_athlete}, voici ton plan personnel.")
 
+    # Chargement des fichiers
     athletes = load_csv(ATHLETES_FILE)
-    noms_athletes = athletes["Nom"].unique().tolist()
-    nom = nom_athlete
-
-    today = dt.date.today()
     assignations = load_csv(ASSIGN_FILE)
     seances = load_csv(SEANCES_STRUCT_FILE)
     feedbacks = load_csv(FEEDBACKS_FILE)
+
     if feedbacks.empty:
-        feedbacks = pd.DataFrame(columns=["Athlete", "Seance", "Semaine", "Date seance", "Effectuee", "RPE", "Commentaire"])
+        st.info("Aucun feedback enregistré pour le moment.")
+        return
 
-    assignations["Semaine"] = pd.to_datetime(assignations["Semaine"], errors="coerce").dt.date
-    user_assign = assignations[assignations["Athlete"] == nom].sort_values("Semaine")
+    # Appliquer la date du lundi
+    assignations["Date_lundi"] = pd.to_datetime(assignations["Semaine"].apply(extraire_date_lundi), errors="coerce")
+    assignations = assignations.dropna(subset=["Date_lundi"])
+    user_assign = assignations[assignations["Athlete"] == nom_athlete].sort_values("Date_lundi")
 
-    semaine_debut = st.date_input("Choisir une semaine (sélectionner le lundi)", today, format="DD/MM/YYYY")
+    # Sélection de la semaine par défaut : lundi courant
+    today = dt.date.today()
+    default_lundi = today - dt.timedelta(days=today.weekday())
+    semaine_debut = st.date_input("Choisir une semaine (sélectionner le lundi)", default_lundi, format="DD/MM/YYYY")
     semaine_fin = semaine_debut + dt.timedelta(days=6)
+
     st.subheader("📝 Séances prévues cette semaine")
     st.markdown(f"📆 Semaine du {semaine_debut.strftime('%d/%m')} au {semaine_fin.strftime('%d/%m')}")
 
-    filtres = user_assign[
-        (user_assign["Semaine"] >= semaine_debut) & (user_assign["Semaine"] <= semaine_fin)
-    ]
+    # Filtrage des assignations de la semaine sélectionnée
+    semaine_debut_dt = pd.to_datetime(semaine_debut)
+    semaine_fin_dt = pd.to_datetime(semaine_fin)
+    filtres = user_assign[(user_assign["Date_lundi"] >= semaine_debut_dt) & (user_assign["Date_lundi"] <= semaine_fin_dt)]
 
     if filtres.empty:
         st.info("Aucune séance assignée cette semaine.")
         return
 
+    # Vérifier les séances orphelines
     assign_seances = filtres["Seance"].unique()
     base_seances = seances["Nom"].unique()
     orphan_seances = [s for s in assign_seances if s not in base_seances]
     if orphan_seances:
-        st.warning(f"⚠️ Certaines séances assignées n'existent pas dans la base : {orphan_seances}")
+        st.warning(f"⚠️ Certaines séances assignées n'existent plus dans la base : {orphan_seances}")
 
-    for jour in pd.date_range(semaine_debut, semaine_fin):
-        jour = jour.date()
-        daily = filtres[filtres["Semaine"] == jour]
+    for jour in pd.date_range(semaine_debut_dt, semaine_fin_dt):
+        daily = filtres[filtres["Date_lundi"] == jour]
 
         if not daily.empty:
             st.markdown("---")
@@ -232,24 +247,25 @@ def page_athlete(nom_athlete):
         for i, (_, row) in enumerate(daily.iterrows()):
             nom_seance = row["Seance"]
             subset = seances[seances["Nom"] == nom_seance]
-            if subset.empty:
-                st.error(f"⚠️ La séance '{nom_seance}' n'existe pas dans la base des séances structurées.")
-                continue
-            seance = subset.iloc[0]
 
+            if subset.empty:
+                st.error(f"⚠️ La séance '{nom_seance}' n'existe plus.")
+                continue
+
+            seance = subset.iloc[0]
             blocs = afficher_blocs(seance["Blocs"])
             duree = seance["Volume total"]
             charge = seance["Charge totale"]
-
-            key_suffix = f"{nom_seance}_{jour}_{i}"
+            key_suffix = f"{nom_seance}_{jour.date()}_{i}"
 
             with st.expander(f"📝 {nom_seance} – {duree} min / Charge {charge}"):
                 st.code(blocs)
 
+                # Feedback existant ?
                 fb_mask = (
-                    (feedbacks["Athlete"] == nom) &
+                    (feedbacks["Athlete"] == nom_athlete) &
                     (feedbacks["Seance"] == nom_seance) &
-                    (feedbacks["Semaine"] == jour)
+                    (pd.to_datetime(feedbacks["Semaine"]) == jour)
                 )
                 existing_feedback = feedbacks[fb_mask]
 
@@ -261,37 +277,33 @@ def page_athlete(nom_athlete):
                     phase_init = existing.get("Phase menstruelle", "")
                     symptomes_init = existing.get("Symptômes", "")
                 else:
-                    fait_init = "Oui"
-                    rpe_init = 5
-                    comm_init = ""
-                    phase_init = ""
-                    symptomes_init = ""
+                    fait_init, rpe_init, comm_init, phase_init, symptomes_init = "Oui", 5, "", "", ""
 
+                # Saisie du feedback
                 fait = st.radio("✅ Séance effectuée ?", ["Oui", "Non"], index=0 if fait_init == "Oui" else 1, key=f"fait_{key_suffix}")
                 rpe = st.slider("RPE (1 à 10)", 1, 10, rpe_init, key=f"rpe_{key_suffix}")
                 glucides = st.slider("🍌 Glucides ingérés (g/h)", 0, 200, 0, step=5, key=f"glucides_{key_suffix}")
                 commentaire = st.text_area("Commentaire", comm_init, key=f"comm_{key_suffix}")
 
-                athlete_data = pd.read_csv("data/athletes.csv")
-                sexe = athlete_data[athlete_data["Nom"] == nom]["Sexe"].iloc[0].lower()
-                amenorrhee = str(athlete_data[athlete_data["Nom"] == nom]["Amenorrhee"].iloc[0]).strip().lower()
+                # Suivi menstruel ?
+                ath_info = athletes[athletes["Nom"] == nom_athlete].iloc[0]
+                sexe = ath_info["Sexe"].lower()
+                amenorrhee = str(ath_info.get("Amenorrhee", "")).strip().lower()
 
-                phase = ""
-                symptomes = ""
-
+                phase = symptomes = ""
                 if sexe == "femme" and amenorrhee != "oui":
                     st.subheader("🌸 Suivi du cycle")
                     phase = st.selectbox("Phase actuelle", ["Règles", "Post-règles", "Ovulation", "Prémenstruel"],
-                                        index=0 if phase_init == "" else ["Règles", "Post-règles", "Ovulation", "Prémenstruel"].index(phase_init),
-                                        key=f"phase_{key_suffix}")
+                                         index=0 if phase_init == "" else ["Règles", "Post-règles", "Ovulation", "Prémenstruel"].index(phase_init),
+                                         key=f"phase_{key_suffix}")
                     symptomes = st.text_area("Symptômes / sensations (facultatif)", symptomes_init, key=f"symptomes_{key_suffix}")
 
-                if st.button("Enregistrer le feedback", key=f"save_{key_suffix}"):
+                if st.button("💾 Enregistrer le feedback", key=f"save_{key_suffix}"):
                     now_str = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     new_entry = {
-                        "Athlete": nom,
+                        "Athlete": nom_athlete,
                         "Seance": nom_seance,
-                        "Semaine": jour,
+                        "Semaine": jour.date(),
                         "Date seance": now_str,
                         "Effectuee": fait,
                         "RPE": rpe,
@@ -302,8 +314,7 @@ def page_athlete(nom_athlete):
                     }
 
                     if not existing_feedback.empty:
-                        idx = existing_feedback.index[0]
-                        feedbacks.loc[idx] = new_entry
+                        feedbacks.loc[existing_feedback.index[0]] = new_entry
                     else:
                         feedbacks = pd.concat([feedbacks, pd.DataFrame([new_entry])], ignore_index=True)
 
@@ -314,48 +325,52 @@ def page_athlete(nom_athlete):
     st.markdown("---")
     st.subheader("📊 Statistiques hebdomadaires")
 
+    # Fusion avec les infos de séance
     merge = filtres.merge(seances, left_on="Seance", right_on="Nom", how="left")
     total_charge = merge["Charge totale"].sum()
     total_duree = merge["Volume total"].sum()
     moy_charge = merge["Charge totale"].mean()
     moy_duree = merge["Volume total"].mean()
 
-    col1, col2 = st.columns(2)
-    col1.metric("⚡ Charge totale", int(total_charge))
-    col2.metric("⏱ Volume total (min)", int(total_duree))
-
-    col3, col4 = st.columns(2)
-    col3.metric("⚖️ Charge moyenne", int(round(moy_charge)))
-    col4.metric("🕐 Volume moyen (min)", int(moy_duree))
-
-        # Comparaison avec semaine précédente
-    prec_debut = semaine_debut - dt.timedelta(days=7)
-    prec_fin = semaine_fin - dt.timedelta(days=7)
+    # Semaine précédente
+    prec_debut = pd.to_datetime(semaine_debut - dt.timedelta(days=7))
+    prec_fin = pd.to_datetime(semaine_fin - dt.timedelta(days=7))
     precedent = user_assign[
-        (user_assign["Semaine"] >= prec_debut) & (user_assign["Semaine"] <= prec_fin)
+        (user_assign["Date_lundi"] >= prec_debut) & (user_assign["Date_lundi"] <= prec_fin)
     ].merge(seances, left_on="Seance", right_on="Nom", how="left")
 
+    # Calculs variation
     if not precedent.empty:
         charge_prec = precedent["Charge totale"].sum()
-        variation_charge = ((total_charge - charge_prec) / charge_prec) * 100 if charge_prec != 0 else 0
-
+        charge_moy_prec = precedent["Charge totale"].mean()
         volume_prec = precedent["Volume total"].sum()
-        variation_volume = ((total_duree - volume_prec) / volume_prec) * 100 if volume_prec != 0 else 0
+        volume_moy_prec = precedent["Volume total"].mean()
 
-        col1, col2 = st.columns(2)
-        col1.metric("📈 Évolution charge semaine", f"{variation_charge:+.1f}%")
-        col2.metric("📉 Évolution volume semaine", f"{variation_volume:+.1f}%")
+        var_tot_charge = ((total_charge - charge_prec) / charge_prec * 100) if charge_prec else None
+        var_moy_charge = ((moy_charge - charge_moy_prec) / charge_moy_prec * 100) if charge_moy_prec else None
+        var_tot_volume = ((total_duree - volume_prec) / volume_prec * 100) if volume_prec else None
+        var_moy_volume = ((moy_duree - volume_moy_prec) / volume_moy_prec * 100) if volume_moy_prec else None
+    else:
+        var_tot_charge = var_moy_charge = var_tot_volume = var_moy_volume = None
 
-# Date de début de l'athlète
-    debut_str = athletes[athletes["Nom"] == nom]["Date debut"].iloc[0] if "Date debut" in athletes.columns else "2023-01-01"
-    afficher_stats_et_evolution(feedbacks, seances, nom, debut_str)
+    # Affichage évolutions intégrées
+    def format_variation(pct):
+        if pct is None:
+            return ""
+        arrow = "▲" if pct >= 0 else "▼"
+        color = "green" if abs(pct) <= 12 else "red"
+        return f"<span style='font-size:0.75em; color:{color}; margin-left:6px'>{arrow} {abs(pct):.1f}%</span>"
 
-    # Suivi menstruel
-    ath_info = athletes[athletes["Nom"] == nom].iloc[0]
-    sexe = ath_info["Sexe"]
-    amenorrhee = ath_info.get("Aménorrhée", False)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"⚡️ **Charge totale :** {int(total_charge)} {format_variation(var_tot_charge)}", unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"⏱️ **Volume total (min) :** {int(total_duree)} min {format_variation(var_tot_volume)}", unsafe_allow_html=True)
 
-    if sexe.lower() == "f" and not amenorrhee:
-        st.subheader("🌸 Suivi du cycle")
-        phase = st.selectbox("Phase actuelle", ["Règles", "Post-règles", "Ovulation", "Prémenstruel"])
-        symptomes = st.text_area("Symptômes / sensations (facultatif)")
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown(f"⚖️ **Charge moyenne :** {int(round(moy_charge))} {format_variation(var_moy_charge)}", unsafe_allow_html=True)
+    with col4:
+        st.markdown(f"🕐 **Volume moyen (min) :** {int(round(moy_duree))} min {format_variation(var_moy_volume)}", unsafe_allow_html=True)
+
+        

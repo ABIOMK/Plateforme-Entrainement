@@ -3,8 +3,10 @@ import pandas as pd
 import os
 import ast
 import json
+import re
 from datetime import date,datetime, timedelta
 from utils.io import load_csv, save_csv
+import ast
 import altair as alt
 
 # Fichiers CSV utilisés
@@ -109,9 +111,16 @@ def page_coach():
 
             athlete_to_remove = st.selectbox("Sélectionner un athlète à supprimer", athletes["Nom"])
             if st.button("❌ Supprimer l'athlète"):
+                # Suppression dans athletes.csv
                 athletes = athletes[athletes["Nom"] != athlete_to_remove]
                 save_csv(athletes, ATHLETES_FILE)
-                st.success(f"Athlète {athlete_to_remove} supprimé.")
+
+                # Suppression dans users.csv uniquement si rôle == 'athlete'
+                users = load_csv("data/users.csv", ["Nom", "Mot de passe", "Role"])
+                users = users[~((users["Nom"] == athlete_to_remove) & (users["Role"] == "athlete"))]
+                save_csv(users, "data/users.csv")
+
+                st.success(f"Athlète {athlete_to_remove} supprimé des fichiers athletes.csv et users.csv.")
                 st.rerun()
         else:
             st.info("Aucun athlète enregistré pour l'instant.")
@@ -279,15 +288,13 @@ def page_coach():
         
         # --- 🔄 Feedback de l’athlète ---
         st.markdown("### 🗣️ Feedbacks de l’athlète")
-        feedback = load_csv(FEEDBACKS_FILE, [
-            "Athlete", "Seance", "Semaine", "Date seance", "Effectuee", "RPE", "Glucides (g/h)",
-            "Commentaire", "Phase menstruelle", "Symptomes"
-        ])
-
-        if feedback.empty or "Athlete" not in feedback.columns:
+        feedbacks = load_csv(FEEDBACKS_FILE)
+        
+        # feedbacks["Semaine"] = pd.to_datetime(feedbacks["Semaine"], errors="coerce")  # à réactiver si nécessaire plus tard
+        if feedbacks.empty or "Athlete" not in feedbacks.columns:
             st.info("Aucun feedback enregistré.")
         else:
-            feedback_ath = feedback[feedback["Athlete"] == nom_select]
+            feedback_ath = feedbacks[feedbacks["Athlete"] == nom_select]
 
             if feedback_ath.empty:
                 st.info("Cet athlète n’a encore donné aucun feedback.")
@@ -371,13 +378,13 @@ def page_coach():
             bloc_type = st.selectbox("Type de bloc", ["Échauffement", "Intervalles", "Récupération", "Allure continue", "Autre"])
             duree = st.number_input("Durée (min par répétition)", min_value=1, max_value=240, value=5)
             repetitions = st.number_input("Répétitions", min_value=1, max_value=30, value=1)
-            zone = st.selectbox("Zone", ["🔘Zone 1", "🔵Zone 2", "🟢Zone 3", "🟡Zone 4", "🔴Zone 5"])
+            zone = st.selectbox("Zone", ["Zone 1", "Zone 2", "Zone 3", "Zone 4", "Zone 5", "Zone 6", 'Zone 7'])
             description = st.text_input("Description (facultatif)")
             add_bloc = st.form_submit_button("Ajouter le bloc")
 
             if add_bloc:
                 bloc = {
-                    "Nom de la séance": nom_seance,
+                    "Nom de la seance": nom_seance,
                     "Type": bloc_type,
                     "Durée": duree,
                     "Répétitions": repetitions,
@@ -390,10 +397,51 @@ def page_coach():
         if st.session_state["blocs_temp"]:
             st.subheader("🧩 Blocs en cours de création")
             df_blocs = pd.DataFrame(st.session_state["blocs_temp"])
+
+            # Extraction du numéro de zone
             df_blocs["Zone_num"] = df_blocs["Zone"].str.extract(r"(\d)").astype(int)
-            df_blocs["Charge"] = df_blocs["Durée"] * df_blocs["Répétitions"] * df_blocs["Zone_num"]
+
+            # Coefficients personnalisés par zone
+            coefficients_zone = {
+                1: 1,
+                2: 2,
+                3: 3,
+                4: 4,
+                5: 5,
+                6: 6,
+                7: 7,
+            }
+
+            df_blocs["Coeff zone"] = df_blocs["Zone_num"].map(coefficients_zone)
+            
+            # Format coefficient à 2 décimales
+            df_blocs["Coeff zone"] = df_blocs["Coeff zone"].map(lambda x: f"{x:.2f}")
+
+            # Calcul charge, arrondi à l'entier
+            df_blocs["Charge"] = (df_blocs["Durée"] * df_blocs["Répétitions"] * df_blocs["Coeff zone"].astype(float)).round().astype(int)
             df_blocs["Volume total"] = df_blocs["Durée"] * df_blocs["Répétitions"]
-            st.dataframe(df_blocs)
+
+            # Coloration selon la zone
+            zone_couleurs = {
+                "1": "#D6EAF8",
+                "2": "#AED6F1",
+                "3": "#F9E79F",
+                "4": "#F5B7B1",
+                "5": "#E74C3C"
+            }
+
+            def surligner_zone(val):
+                num = re.search(r"\d", val)
+                if num:
+                    return f"background-color: {zone_couleurs.get(num.group(), '')}; text-align: center"
+                return ""
+
+            st.dataframe(
+                df_blocs[["Type", "Durée", "Répétitions", "Zone", "Coeff zone", "Charge", "Description"]]
+                .style.applymap(surligner_zone, subset=["Zone"]),
+                use_container_width=True,
+                hide_index=True
+            )
 
             st.metric("Volume total (min)", int(df_blocs["Volume total"].sum()))
             st.metric("Charge totale", int(df_blocs["Charge"].sum()))
@@ -405,7 +453,7 @@ def page_coach():
                     seance_dict = {
                         "Nom": nom_seance,
                         "Blocs": json.dumps(df_blocs.to_dict(orient="records")),
-                        "Charge totale": df_blocs["Charge"].sum(),
+                        "Charge totale": int(df_blocs["Charge"].sum()),
                         "Volume total": df_blocs["Volume total"].sum()
                     }
                     seances_struct = pd.concat([seances_struct, pd.DataFrame([seance_dict])], ignore_index=True)
@@ -413,6 +461,7 @@ def page_coach():
                     st.success(f"Seance '{nom_seance}' enregistrée ✅")
                     st.session_state["blocs_temp"] = []
                     st.rerun()
+
         else:
             st.info("Aucun bloc ajouté pour l’instant.")
 
@@ -496,19 +545,7 @@ def page_coach():
                 save_csv(seances_struct, SEANCES_STRUCT_FILE)
                 st.success(f"Seance '{nom_seance_select}' supprimée.")
                 st.rerun()
-
-    # --- Application principale avec navigation ---
-    def main():
-        st.sidebar.title("Navigation")
-        page = st.sidebar.radio("Aller à", ["Gestion Athlètes", "Profil Athlète"])
-
-        if page == "Gestion Athlètes":
-            page_gestion_athletes()
-        elif page == "Profil Athlète":
-            page_profil_athlete()
-    if __name__ == "__main__":
-        main()
-    
+                
     # --- PAGE ASSIGNATION SEANCES ---
     def formater_semaine(date_obj):
         semaine_num = f"{date_obj.isocalendar()[1]:02d}"
@@ -518,7 +555,9 @@ def page_coach():
     def extraire_date_lundi(chaine_semaine):
         try:
             jour_mois = chaine_semaine.split(" - ")[1]
-            annee = datetime.today().year
+            jour, mois = map(int, jour_mois.split("/"))
+            today = datetime.today()
+            annee = today.year if mois >= today.month else today.year - 1
             return datetime.strptime(f"{jour_mois}/{annee}", "%d/%m/%Y")
         except Exception:
             return None
@@ -535,34 +574,99 @@ def page_coach():
             st.warning("⚠️ Ajoutez au moins un athlète et une séance avant d’assigner.")
             return
 
-        # Sélection athlète et séance
+        # Sélection athlète, séance, semaine
         athlete_select = st.selectbox("👤 Choisir un athlète", athletes["Nom"])
         seance_select = st.selectbox("📋 Choisir une séance", seances_struct["Nom"])
-
-        # Choix de la semaine
-        annee_actuelle = datetime.today().year
-        annee = st.number_input("📆 Année", value=annee_actuelle, min_value=2020, max_value=2100)
+        annee = st.number_input("📆 Année", value=datetime.today().year, min_value=2020, max_value=2100)
         num_semaine = st.number_input("📅 Numéro de semaine (1 à 53)", min_value=1, max_value=53, value=datetime.today().isocalendar()[1])
 
         try:
-            semaine = datetime.fromisocalendar(annee, num_semaine, 1)  # Lundi de la semaine
+            semaine = datetime.fromisocalendar(annee, num_semaine, 1)
         except ValueError:
             st.error("⛔ Semaine invalide pour cette année.")
             return
-
+        
+                # --- Bouton assignation ---
         if st.button("✅ Assigner la séance"):
             semaine_formatee = formater_semaine(semaine)
-            new_assign = {
-                "Athlete": athlete_select,
-                "Seance": seance_select,
-                "Semaine": semaine_formatee
-            }
-            assignments = pd.concat([assignments, pd.DataFrame([new_assign])], ignore_index=True)
-            save_csv(assignments, ASSIGN_FILE)
-            st.success("Séance assignée avec succès 🎯")
-            st.rerun()
+            already_exists = (
+                (assignments["Athlete"] == athlete_select) &
+                (assignments["Seance"] == seance_select) &
+                (assignments["Semaine"] == semaine_formatee)
+            ).any()
 
-        # --- Affichage des assignations existantes ---
+            if already_exists:
+                st.warning("⚠️ Cette assignation existe déjà.")
+            else:
+                new_assign = {
+                    "Athlete": athlete_select,
+                    "Seance": seance_select,
+                    "Semaine": semaine_formatee
+                }
+                assignments = pd.concat([assignments, pd.DataFrame([new_assign])], ignore_index=True)
+                save_csv(assignments, ASSIGN_FILE)
+                st.success("Séance assignée avec succès 🎯")
+                st.rerun()
+
+        # --- Visualisation des charges planifiées ---
+        st.markdown("### 📊 Charge externe planifiée (4 dernières semaines)")
+
+        df_assign = assignments[assignments["Athlete"] == athlete_select].copy()
+
+        if df_assign.empty:
+            st.info("Aucune séance assignée à cet athlète.")
+        else:
+            seances_info = seances_struct[["Nom", "Charge totale", "Volume total"]]
+            df_assign = df_assign.merge(seances_info, left_on="Seance", right_on="Nom", how="left")
+            df_assign = df_assign.dropna(subset=["Charge totale", "Volume total"])
+
+            df_assign["Charge totale"] = pd.to_numeric(df_assign["Charge totale"], errors="coerce")
+            df_assign["Volume total"] = pd.to_numeric(df_assign["Volume total"], errors="coerce")
+            df_assign["Date_lundi"] = df_assign["Semaine"].apply(extraire_date_lundi)
+            df_assign = df_assign.dropna(subset=["Date_lundi"])
+
+            df_assign = df_assign[df_assign["Date_lundi"] >= datetime.today() - timedelta(weeks=4)]
+
+            df_semaines = df_assign.groupby("Semaine").agg({
+                "Charge totale": "sum",
+                "Volume total": "sum",
+                "Seance": "count"
+            }).reset_index()
+
+            df_semaines["Charge moyenne"] = df_semaines.apply(
+                lambda row: row["Charge totale"] / row["Seance"] if row["Seance"] > 0 else 0,
+                axis=1
+            )
+
+            chart = alt.Chart(df_semaines).mark_bar(color="#2CA02C").encode(
+                x=alt.X("Semaine", title="Semaine"),
+                y=alt.Y("Charge totale", title="Charge externe"),
+                tooltip=["Semaine", "Charge totale"]
+            ).properties(height=200)
+            st.altair_chart(chart, use_container_width=True)
+
+            def evolution_pct(df, col):
+                if len(df) < 2:
+                    return 0, 0
+                last, prev = df.iloc[-1][col], df.iloc[-2][col]
+                delta = last - prev
+                pct = (delta / prev * 100) if prev else 0
+                return delta, pct
+
+            col1, col2, col3 = st.columns(3)
+            metrics = [
+                ("⚡️ **Charge totale**", "Charge totale", col1),
+                ("⚖️ **Charge moyenne**", "Charge moyenne", col2),
+                ("⏱️ **Volume total (min)**", "Volume total", col3),
+            ]
+
+            for label, col_name, col in metrics:
+                delta, pct = evolution_pct(df_semaines, col_name)
+                val = df_semaines.iloc[-1][col_name] if len(df_semaines) > 0 else 0
+                delta_color = "inverse" if pct > 12 else "normal"
+                col.metric(label, f"{val:.1f}", delta=f"{pct:+.1f} %", delta_color=delta_color)
+                
+        # --- Affichage & suppression assignations ---
         st.subheader("📅 Assignations existantes")
 
         if assignments.empty:
@@ -571,22 +675,15 @@ def page_coach():
 
         df_aff = assignments.copy()
         df_aff["Date_lundi"] = df_aff["Semaine"].apply(extraire_date_lundi)
-
-        # 🔎 Filtrage des 4 dernières semaines
-        date_limite = datetime.today() - timedelta(weeks=4)
-        df_aff = df_aff[df_aff["Date_lundi"] >= date_limite]
-
-        # 🎛️ Filtres interactifs
-        col1, col2, col3 = st.columns(3)
+        df_aff = df_aff[df_aff["Date_lundi"] >= datetime.today() - timedelta(weeks=4)]
 
         with col1:
-            athlete_filter = st.selectbox("👤 Filtrer par athlète", ["Tous"] + sorted(df_aff["Athlete"].unique()))
+            athlete_filter = st.selectbox("👤 Filtrer par athlète", ["Tous"] + sorted(df_aff["Athlete"].unique()), key="filtre_athlete_assign")
         with col2:
-            seance_filter = st.selectbox("🏃 Filtrer par séance", ["Tous"] + sorted(df_aff["Seance"].unique()))
+            seance_filter = st.selectbox("🏃 Filtrer par séance", ["Tous"] + sorted(df_aff["Seance"].unique()), key="filtre_seance_assign")
         with col3:
-            semaine_filter = st.selectbox("📆 Filtrer par semaine", ["Toutes"] + sorted(df_aff["Semaine"].unique()))
+            semaine_filter = st.selectbox("📆 Filtrer par semaine", ["Toutes"] + sorted(df_aff["Semaine"].unique()), key="filtre_semaine_assign")
 
-        # Application des filtres
         if athlete_filter != "Tous":
             df_aff = df_aff[df_aff["Athlete"] == athlete_filter]
         if seance_filter != "Tous":
@@ -594,12 +691,11 @@ def page_coach():
         if semaine_filter != "Toutes":
             df_aff = df_aff[df_aff["Semaine"] == semaine_filter]
 
-        # Affichage final
         df_aff = df_aff.sort_values(by=["Athlete", "Date_lundi"])
         colonnes_aff = [col for col in df_aff.columns if col != "Date_lundi"]
         st.dataframe(df_aff[colonnes_aff], use_container_width=True, hide_index=True)
 
-        # --- Suppression ---
+        # --- Suppression assignation ---
         st.subheader("✏️ Supprimer une assignation")
 
         def format_assignation(i):
@@ -608,15 +704,35 @@ def page_coach():
             semaine = df_aff.at[i, "Semaine"]
             return f"{ath} - {seance} - {semaine}"
 
-        ligne_sel = st.selectbox("Sélectionner une assignation", df_aff.index, format_func=format_assignation)
+        if not df_aff.empty:
+            ligne_sel = st.selectbox("Sélectionner une assignation", df_aff.index, format_func=format_assignation, key="selectbox_suppression_assign")
 
-        if st.button("🗑 Supprimer cette assignation"):
-            assignments = assignments.drop(index=ligne_sel)
-            save_csv(assignments, ASSIGN_FILE)
-            st.success("Assignation supprimée.")
-            st.rerun()
+            if st.button("🗑 Supprimer cette assignation"):
+                ligne = df_aff.loc[ligne_sel]
+                mask = (
+                    (assignments["Athlete"] == ligne["Athlete"]) &
+                    (assignments["Seance"] == ligne["Seance"]) &
+                    (assignments["Semaine"] == ligne["Semaine"])
+                )
+                assignments = assignments[~mask]
+                save_csv(assignments, ASSIGN_FILE)
+                st.success("Assignation supprimée.")
+                st.rerun()
+
         
     # --- MAIN ---
+    def main():
+        st.sidebar.title("Navigation")
+        page = st.sidebar.radio("Aller à", ["Gestion Athlètes", "Profil Athlète"])
+
+        if page == "Gestion Athlètes":
+            page_gestion_athletes()
+        elif page == "Profil Athlète":
+            page_profil_athlete()
+    if __name__ == "__main__":
+        main()
+    
+    
     page = st.sidebar.selectbox("Menu", [
         "Gestion des athlètes",
         "Profil athlète",
