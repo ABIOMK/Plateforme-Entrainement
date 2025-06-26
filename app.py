@@ -27,11 +27,7 @@ def afficher_page_accueil():
     - Suivre vos progrès,
     - Donner vos feedback après chaque séance, 
     - Ajouter des séances supplémentaires non prévues dans le plan initial. 
-
-    --Ici je viens simplement tester le git --
-
     ---
-
     👉 Saisissez votre rôle, login et mot de passe dans le menu latéral pour commencer.
     """)
     st.info("🔐 Toutes les données sont confidentielles et accessibles uniquement via ID et mot de passe.")
