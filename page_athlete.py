@@ -3,15 +3,17 @@ import pandas as pd
 from datetime import date,datetime, timedelta
 import datetime as dt
 import json
-import calendar
-import os
 from utils.io import load_csv, save_csv
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit.components.v1 as components
+import re
+from collections import defaultdict
+import plotly.express as px
+import time
+from utils.calculs import (format_h_min,extraire_date_lundi, afficher_blocs)
 
 ASSIGN_FILE = "data/assignments.csv"
-#SEANCES_FILE = "data/seances.csv"
 ATHLETES_FILE = "data/athletes.csv"
 SEANCES_STRUCT_FILE = "data/seances_struct.csv"
 FEEDBACKS_FILE = "data/feedbacks.csv"
@@ -149,51 +151,6 @@ def afficher_stats_et_evolution(feedbacks, seances, nom_athlete, debut_entrainem
     )
     st.plotly_chart(fig2, use_container_width=True)
 
-
-def afficher_blocs(blocs):
-    if not blocs or isinstance(blocs, float):
-        return ""
-
-    if isinstance(blocs, str):
-        try:
-            blocs = json.loads(blocs)
-        except Exception:
-            return ""
-
-    if not isinstance(blocs, list):
-        return ""
-
-    lignes = []
-    for b in blocs:
-        repetitions = b.get('Répétitions', 1)
-        volume = b.get('Volume total', b.get('Durée', ''))
-        zone = b.get('Zone', '')
-        bloc_type = b.get('Type', '')
-        description = b.get('Description', '')
-
-        ligne = f"{repetitions}× {volume}min – {zone} [{bloc_type}]"
-        if description:
-            ligne += f" - {description}"
-        lignes.append(ligne)
-
-    return "\n".join(lignes)
-
-
-def afficher_blocs(blocs):
-    blocs = json.loads(blocs) if isinstance(blocs, str) else blocs
-    return "\n".join([
-        f"{b['Répétitions']}× {b['Volume total']}min – {b['Zone']} [{b['Type']}] {b.get('Description', '')}"
-        for b in blocs
-    ])
-
-def extraire_date_lundi(chaine_semaine):
-    try:
-        jour_mois = chaine_semaine.split(" - ")[1]
-        annee = datetime.today().year
-        return datetime.strptime(f"{jour_mois}/{annee}", "%d/%m/%Y")
-    except Exception:
-        return None
-
 def page_athlete(nom_athlete):
     st.header("🏃 Espace Athlètes")
     st.write(f"Bonjour {nom_athlete}, voici ton plan personnel.")
@@ -213,19 +170,29 @@ def page_athlete(nom_athlete):
     assignations = assignations.dropna(subset=["Date_lundi"])
     user_assign = assignations[assignations["Athlete"] == nom_athlete].sort_values("Date_lundi")
 
-    # Sélection de la semaine par défaut : lundi courant
-    today = dt.date.today()
-    default_lundi = today - dt.timedelta(days=today.weekday())
-    semaine_debut = st.date_input("Choisir une semaine (sélectionner le lundi)", default_lundi, format="DD/MM/YYYY")
-    semaine_fin = semaine_debut + dt.timedelta(days=6)
+    # Création des labels de semaines disponibles
+    semaines_disponibles = user_assign["Date_lundi"].drop_duplicates().sort_values()
+    if semaines_disponibles.empty:
+        st.warning("Aucune semaine assignée pour cet athlète.")
+        return
+
+    libelles_semaines = [
+        f"S{d.isocalendar().week:02d} du {d.date().strftime('%d/%m')} au {(d + pd.Timedelta(days=6)).date().strftime('%d/%m')}"
+        for d in semaines_disponibles
+    ]
+    mapping_semaines = dict(zip(libelles_semaines, semaines_disponibles))
+
+    selected_label = st.selectbox("📅 Choisis une semaine :", libelles_semaines)
+    semaine_debut = mapping_semaines[selected_label]
+    semaine_fin = semaine_debut + pd.Timedelta(days=6)
 
     st.subheader("📝 Séances prévues cette semaine")
-    st.markdown(f"📆 Semaine du {semaine_debut.strftime('%d/%m')} au {semaine_fin.strftime('%d/%m')}")
+    st.markdown(f"📆 {selected_label}")
 
     # Filtrage des assignations de la semaine sélectionnée
-    semaine_debut_dt = pd.to_datetime(semaine_debut)
-    semaine_fin_dt = pd.to_datetime(semaine_fin)
-    filtres = user_assign[(user_assign["Date_lundi"] >= semaine_debut_dt) & (user_assign["Date_lundi"] <= semaine_fin_dt)]
+    filtres = user_assign[
+        (user_assign["Date_lundi"] >= semaine_debut) & (user_assign["Date_lundi"] <= semaine_fin)
+    ]
 
     if filtres.empty:
         st.info("Aucune séance assignée cette semaine.")
@@ -238,7 +205,7 @@ def page_athlete(nom_athlete):
     if orphan_seances:
         st.warning(f"⚠️ Certaines séances assignées n'existent plus dans la base : {orphan_seances}")
 
-    for jour in pd.date_range(semaine_debut_dt, semaine_fin_dt):
+    for jour in pd.date_range(semaine_debut, semaine_fin):
         daily = filtres[filtres["Date_lundi"] == jour]
 
         if not daily.empty:
@@ -321,7 +288,7 @@ def page_athlete(nom_athlete):
                     save_csv(feedbacks, FEEDBACKS_FILE)
                     st.success("Feedback enregistré ✅")
 
-    # Statistiques hebdo
+    # --- AFFICAHGE DES STATISTIQUES HEBDOMADAIRES --- 
     st.markdown("---")
     st.subheader("📊 Statistiques hebdomadaires")
 
@@ -365,12 +332,149 @@ def page_athlete(nom_athlete):
     with col1:
         st.markdown(f"⚡️ **Charge totale :** {int(total_charge)} {format_variation(var_tot_charge)}", unsafe_allow_html=True)
     with col2:
-        st.markdown(f"⏱️ **Volume total (min) :** {int(total_duree)} min {format_variation(var_tot_volume)}", unsafe_allow_html=True)
+        st.markdown(f"⏱️ **Volume total :** {format_h_min(total_duree)} {format_variation(var_tot_volume)}", unsafe_allow_html=True)
 
     col3, col4 = st.columns(2)
     with col3:
         st.markdown(f"⚖️ **Charge moyenne :** {int(round(moy_charge))} {format_variation(var_moy_charge)}", unsafe_allow_html=True)
     with col4:
-        st.markdown(f"🕐 **Volume moyen (min) :** {int(round(moy_duree))} min {format_variation(var_moy_volume)}", unsafe_allow_html=True)
+        st.markdown(f"🕐 **Volume moyen :** {format_h_min(moy_duree)} {format_variation(var_moy_volume)}", unsafe_allow_html=True)
 
-        
+    # -- AJOUT D'UNE SEANCE SUPPLEMENTAIRE NON PREVUE DANS LE PLAN --
+    st.markdown("---")
+    st.subheader("➕ Ajouter une séance supplémentaire (hors plan)")
+
+    # Gestion d’un message temporaire après envoi
+    if "seance_envoyee" not in st.session_state:
+        st.session_state["seance_envoyee"] = False
+
+    # Réinitialiser après le rerun, AVANT le widget
+    if st.session_state["seance_envoyee"]:
+        st.session_state["seance_extra"] = ""
+        st.session_state["seance_envoyee"] = False
+        st.rerun()
+
+    # Zone de saisie (ne surtout pas modifier session_state après ça dans le même cycle)
+    st.text_area(
+        "Décris ta séance complémentaire : date, contenu, commentaire",
+        key="seance_extra"
+    )
+
+    if st.button("📬 Envoyer la séance supplémentaire"):
+        saisie = st.session_state["seance_extra"].strip()
+        if saisie == "":
+            st.warning("Merci de décrire ta séance avant d'envoyer.")
+        else:
+            try:
+                extras = pd.read_csv("extras_seances.csv")
+            except FileNotFoundError:
+                extras = pd.DataFrame(columns=["Athlete", "Date", "Description"])
+
+            nouvelle_ligne = {
+                "Athlete": nom_athlete,
+                "Date": dt.date.today().strftime("%Y-%m-%d"),
+                "Description": saisie
+            }
+
+            extras = pd.concat([extras, pd.DataFrame([nouvelle_ligne])], ignore_index=True)
+            extras.to_csv("extras_seances.csv", index=False)
+
+            st.session_state["seance_envoyee"] = True
+            st.success("Séance supplémentaire enregistrée. Ton coach sera informé.")
+          #  st.rerun()
+    
+    
+    # -- AFFICHAGE DU TEMPS PASSE DANS CHAQUE ZONE SUR LES 6 DERNIERES SEMAINES -- 
+    def formater_semaine(date_dt):
+        num_semaine = date_dt.isocalendar()[1]
+        return f"S{num_semaine:02d} - {date_dt.day:02d}/{date_dt.month:02d}"
+
+    st.markdown("### 📈 Évolution sur 6 semaines — temps passé par zone")
+
+    zone_couleurs = {
+        "1": "gray",
+        "2": "#2D93D7",
+        "3": "#64AC37",
+        "4": "#D08E01",
+        "5": "#C81906",
+        "6": "#680D03",
+        "7": "#68038A"
+    }
+
+    # Extraire année et numéro semaine de la date sélectionnée
+    annee = semaine_debut.isocalendar()[0]
+    num_semaine = semaine_debut.isocalendar()[1]
+
+    try:
+        date_ref = datetime.fromisocalendar(annee, num_semaine, 1)  # lundi de la semaine sélectionnée
+    except Exception:
+        st.info("Impossible de générer le graphique sur 6 semaines.")
+        date_ref = None
+
+    if date_ref:
+        durees_par_semaine = defaultdict(lambda: {str(z): 0 for z in range(1, 8)})
+
+        for delta in range(5, -1, -1):  # 6 dernières semaines, plus ancienne à gauche
+            semaine_dt = date_ref - timedelta(weeks=delta)
+            semaine_str = formater_semaine(semaine_dt)
+
+            df_assign_zone = assignations[
+                (assignations["Athlete"] == nom_athlete) &
+                (assignations["Semaine"] == semaine_str)
+            ]
+
+            for _, assign in df_assign_zone.iterrows():
+                nom_seance = assign["Seance"]
+                seance_row = seances[seances["Nom"] == nom_seance]
+                if seance_row.empty:
+                    continue
+
+                try:
+                    blocs = json.loads(seance_row["Blocs"].values[0])
+                except Exception:
+                    continue
+
+                for bloc in blocs:
+                    zone_num = bloc.get("Zone_num")
+                    if zone_num is None:
+                        zone = bloc.get("Zone", "")
+                        match = re.search(r"\d", zone)
+                        zone_num = int(match.group()) if match else None
+
+                    try:
+                        zone_num = str(int(zone_num))
+                        duree = float(bloc.get("Durée", 0))
+                        repetitions = int(bloc.get("Répétitions", 1))
+                        total_duree = duree * repetitions
+
+                        if zone_num in durees_par_semaine[semaine_str]:
+                            durees_par_semaine[semaine_str][zone_num] += total_duree
+                    except Exception:
+                        continue
+
+        if not durees_par_semaine:
+            st.info("Aucune donnée sur les 6 dernières semaines.")
+        else:
+            df_cumule = pd.DataFrame(durees_par_semaine).T.reset_index()
+            df_cumule = df_cumule.rename(columns={"index": "Semaine"})
+            df_cumule = df_cumule.sort_values(by="Semaine")
+            df_melt = df_cumule.melt(id_vars="Semaine", var_name="Zone", value_name="Durée (min)")
+
+            fig_bar = px.bar(
+                df_melt,
+                x="Semaine",
+                y="Durée (min)",
+                color="Zone",
+                text_auto=True,
+                color_discrete_map=zone_couleurs,
+                title="Histogramme empilé - Temps passé par zone (6 dernières semaines)"
+            )
+            fig_bar.update_layout(
+                barmode="stack",
+                yaxis_title="Temps cumulé (min)",
+                xaxis_title="Semaine",
+                legend_title="Zone",
+                height=350
+            )
+
+            st.plotly_chart(fig_bar, use_container_width=True)
